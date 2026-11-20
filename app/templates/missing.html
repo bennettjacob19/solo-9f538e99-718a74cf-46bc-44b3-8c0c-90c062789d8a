@@ -15,5 +15,5 @@
   {% for t in status.pendingTraces %}<li>pending {{ t.traceId }} ({{ t.spanCount }} spans)</li>{% endfor %}
 </ul>
 {% endif %}
-<p><a href="/">← Back to overview</a></p>
+<p>{% if view_id %}<a href="/?view={{ view_id }}">← Back to the snapshot list</a>{% else %}<a href="/">← Back to overview</a>{% endif %}</p>
 {% endblock %}

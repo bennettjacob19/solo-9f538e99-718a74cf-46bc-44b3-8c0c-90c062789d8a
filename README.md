@@ -53,6 +53,26 @@ archiving resumes — or when a failed SQLite write later succeeds — every pen
 trace is written automatically. Write failures use exponential backoff (max
 30s) and never lose the expired content.
 
+### Snapshot views for browsing
+
+Opening the overview pins a **snapshot view** of the committed archive: one
+extra SQLite connection to the same database file holding a WAL read
+transaction. Nothing is copied and archiving is never blocked — new traces and
+same-id re-archives keep committing while you browse.
+
+* Paging (Older/Newer) and returning from a detail keep the list, its order
+  and the total count exactly as the first screen rendered them — no
+  duplicates or skipped rows when new traces land.
+* A trace detail opened from the list shows the spans of the version that
+  screen listed, even if the same trace id has since been re-archived. Bare
+  `/traces/{id}` links and the JSON API always read the live archive.
+* **View latest** ends the current view and re-reads a fresh first screen;
+  every other open view stays valid.
+* A view lives for 5 minutes after the first screen and at most 8 views are
+  open at once; a 9th first screen asks you to retry later. Expired views are
+  released automatically, and views never survive a restart — expired, ended
+  or unknown view links answer `410` and ask you to reopen the overview.
+
 ## Run with Docker Compose
 
 ```bash
@@ -69,6 +89,8 @@ set in a `.env` file next to `docker-compose.yml`:
 | `SAMPLE_WINDOW_SECONDS` | `2` | collection window per trace |
 | `MAX_ACTIVE_TRACES` | `16` | traces occupying slots |
 | `MAX_SPANS_PER_TRACE` | `64` | distinct spans kept per trace |
+| `VIEW_TTL_SECONDS` | `300` | snapshot view lifetime after the first screen |
+| `MAX_VIEWS` | `8` | concurrent snapshot views |
 | `DB_PATH` | `/data/traces.db` | SQLite file (container) |
 | `LOG_LEVEL` | `INFO` | log level |
 
@@ -109,11 +131,12 @@ Only OTLP/HTTP JSON is decoded; protobuf exports receive HTTP 415.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `POST` | `/v1/traces` | OTLP/HTTP JSON export |
-| `GET` | `/` | overview: status, archived traces, pause/resume |
-| `GET` | `/traces/{traceId}` | every archived span of one trace |
+| `GET` | `/` | overview: opens a snapshot view (`?view=<id>` keeps paging inside it) |
+| `GET` | `/traces/{traceId}` | every archived span of one trace (`?view=<id>` reads the view's version) |
+| `POST` | `/views/{viewId}/end` | end a view and redirect to a fresh first screen |
 | `GET` | `/api/status` | sampler state and counters |
-| `GET` | `/api/traces` | archived traces (`limit`, `offset`) |
-| `GET` | `/api/traces/{traceId}` | archived trace as JSON |
+| `GET` | `/api/traces` | archived traces, live data (`limit`, `offset`) |
+| `GET` | `/api/traces/{traceId}` | archived trace as JSON, live data |
 | `POST` | `/api/archive/pause` · `/api/archive/resume` | pause / resume archiving |
 | `GET` | `/healthz` | liveness |
 
@@ -123,6 +146,7 @@ Only OTLP/HTTP JSON is decoded; protobuf exports receive HTTP 415.
 app/otlp.py      OTLP/HTTP JSON parsing and response shaping
 app/sampler.py   window/slot state machine, dedupe, cap, pause, retry
 app/storage.py   transactional SQLite archive
+app/views.py     snapshot views: WAL read snapshots with TTL and a cap
 app/main.py      FastAPI app factory, routes, templates
 tests/           sampler unit tests and HTTP-level tests
 ```

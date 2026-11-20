@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from typing import Callable, Optional
 
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from .otlp import OtlpParseError, export_response, parse_trace_request
@@ -24,6 +24,14 @@ from .sampler import (
     TraceSampler,
 )
 from .storage import ArchiveStore
+from .views import (
+    DEFAULT_MAX_VIEWS,
+    DEFAULT_VIEW_TTL_SECONDS,
+    TraceView,
+    ViewClosedError,
+    ViewLimitError,
+    ViewManager,
+)
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -102,6 +110,8 @@ def create_app(
     window_seconds: Optional[float] = None,
     capacity: Optional[int] = None,
     max_spans_per_trace: Optional[int] = None,
+    view_ttl_seconds: Optional[float] = None,
+    max_views: Optional[int] = None,
     start_sampler_thread: bool = True,
     clock: Optional[Callable[[], float]] = None,
 ) -> FastAPI:
@@ -119,6 +129,17 @@ def create_app(
         if max_spans_per_trace is not None
         else _env_int("MAX_SPANS_PER_TRACE", DEFAULT_MAX_SPANS),
         clock=clock,
+    )
+    views = ViewManager(
+        db_path,
+        ttl_seconds=view_ttl_seconds
+        if view_ttl_seconds is not None
+        else _env_float("VIEW_TTL_SECONDS", DEFAULT_VIEW_TTL_SECONDS),
+        max_views=max_views
+        if max_views is not None
+        else _env_int("MAX_VIEWS", DEFAULT_MAX_VIEWS),
+        clock=clock,
+        start_reaper=start_sampler_thread,
     )
     templates = Jinja2Templates(directory=TEMPLATE_DIR)
     templates.env.filters["pretty_json"] = _pretty_json
@@ -140,11 +161,13 @@ def create_app(
             yield
         finally:
             sampler.stop()
+            views.close_all()
             store.close()
 
     app = FastAPI(title="OTLP Tail Sampler", lifespan=lifespan)
     app.state.store = store
     app.state.sampler = sampler
+    app.state.views = views
 
     def render(request: Request, name: str, context: dict, status_code: int = 200):
         return templates.TemplateResponse(
@@ -160,13 +183,45 @@ def create_app(
         """Run due archive writes inline so a page reflects just-finished work."""
         sampler.tick()
 
-    def overview(request: Request) -> HTMLResponse:
-        traces, total = store.list_traces(limit=50, offset=0)
+    def render_index(
+        request: Request, view: TraceView, limit: int, offset: int
+    ) -> HTMLResponse:
+        """Render the overview from one pinned snapshot view."""
+
+        traces, total = view.list_traces(limit, offset)
         return render(
             request,
             "index.html",
-            page_context(request, traces=traces, total=total, limit=50, offset=0),
+            page_context(
+                request,
+                traces=traces,
+                total=total,
+                limit=limit,
+                offset=offset,
+                view_id=view.view_id,
+                view_expires_in=int(view.expires_in()),
+            ),
         )
+
+    def view_gone(request: Request) -> HTMLResponse:
+        """The view expired, was ended, or never existed (e.g. after restart)."""
+        return render(
+            request, "view_gone.html", page_context(request), status_code=410
+        )
+
+    def overview(request: Request) -> HTMLResponse:
+        """Open a fresh snapshot view and render its first screen."""
+
+        try:
+            view = views.create()
+        except ViewLimitError:
+            return render(
+                request, "view_full.html", page_context(request), status_code=503
+            )
+        try:
+            return render_index(request, view, limit=50, offset=0)
+        except ViewClosedError:
+            return view_gone(request)
 
     # -- OTLP ingest --------------------------------------------------------
     @app.post("/v1/traces")
@@ -213,33 +268,83 @@ def create_app(
     # -- HTML ---------------------------------------------------------------
     @app.get("/", response_class=HTMLResponse)
     async def index(
-        request: Request, limit: int = Query(50, ge=1, le=200), offset: int = 0
+        request: Request,
+        limit: int = Query(50, ge=1, le=200),
+        offset: int = 0,
+        view: Optional[str] = None,
     ):
         offset = max(0, offset)
-        traces, total = store.list_traces(limit=limit, offset=offset)
-        return render(
-            request,
-            "index.html",
-            page_context(
-                request,
-                traces=traces,
-                total=total,
-                limit=limit,
-                offset=offset,
-            ),
-        )
+        if view:
+            # Paging or returning from a detail: keep reading the first
+            # screen's snapshot instead of the live archive.
+            current = views.get(view)
+            if current is None:
+                return view_gone(request)
+            try:
+                return render_index(request, current, limit, offset)
+            except ViewClosedError:
+                return view_gone(request)
+        # First screen: pin a fresh snapshot of the committed archive.
+        try:
+            current = views.create()
+        except ViewLimitError:
+            return render(
+                request, "view_full.html", page_context(request), status_code=503
+            )
+        try:
+            return render_index(request, current, limit, offset)
+        except ViewClosedError:
+            return view_gone(request)
 
     @app.get("/traces/{trace_id}", response_class=HTMLResponse)
-    async def trace_detail(request: Request, trace_id: str):
-        trace = store.get_trace(trace_id)
+    async def trace_detail(
+        request: Request,
+        trace_id: str,
+        view: Optional[str] = None,
+        limit: int = Query(50, ge=1, le=200),
+        offset: int = 0,
+    ):
+        current = None
+        if view:
+            current = views.get(view)
+            if current is None:
+                return view_gone(request)
+        try:
+            # Inside a view the detail shows the trace exactly as the first
+            # screen archived it; a bare link reads the live archive.
+            trace = (
+                current.get_trace(trace_id)
+                if current is not None
+                else store.get_trace(trace_id)
+            )
+        except ViewClosedError:
+            return view_gone(request)
         if trace is None:
             return render(
                 request,
                 "missing.html",
-                page_context(request, trace_id=trace_id),
+                page_context(request, trace_id=trace_id, view_id=view),
                 status_code=404,
             )
-        return render(request, "trace.html", page_context(request, trace=trace))
+        return render(
+            request,
+            "trace.html",
+            page_context(
+                request,
+                trace=trace,
+                view_id=view,
+                limit=limit,
+                offset=max(0, offset),
+                view_expires_in=int(current.expires_in()) if current else None,
+            ),
+        )
+
+    @app.post("/views/{view_id}/end")
+    async def end_view(view_id: str):
+        # "View latest": end the current view, then re-read a fresh first
+        # screen.  Every other open view stays valid.
+        views.end(view_id)
+        return RedirectResponse(url="/", status_code=303)
 
     @app.post("/pause", response_class=HTMLResponse)
     async def page_pause(request: Request):

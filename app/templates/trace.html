@@ -2,8 +2,18 @@
 {% block title %}{{ trace.trace_id }} · Tail Sampler{% endblock %}
 {% block content %}
 <div class="toolbar">
+  {% if view_id %}
+  <a href="/?view={{ view_id }}&limit={{ limit }}&offset={{ offset }}">← Back to the snapshot list</a>
+  {% else %}
   <a href="/">← All traces</a>
+  {% endif %}
   <span class="spacer"></span>
+  {% if view_id %}
+  <span class="small muted">snapshot view · expires in {{ view_expires_in }}s</span>
+  <form class="inline" method="post" action="/views/{{ view_id }}/end">
+    <button type="submit">View latest</button>
+  </form>
+  {% endif %}
   <span class="badge {% if trace.error_count %}err{% else %}ok{% endif %}">{{ trace.error_count }} ERROR / {{ trace.span_count }} spans</span>
 </div>
 

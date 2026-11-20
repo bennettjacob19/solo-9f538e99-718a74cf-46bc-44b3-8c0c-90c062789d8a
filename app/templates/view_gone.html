@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}View no longer available{% endblock %}
+{% block content %}
+<h2>This snapshot view is no longer available</h2>
+<p class="muted">
+  The list you were browsing was a snapshot of the committed archive. Snapshot
+  views are kept for 5 minutes after the first screen, end early when you use
+  “View latest”, and never survive a service restart. The archive itself is
+  unaffected — new traces kept committing while you browsed.
+</p>
+<p><a href="/">← Reopen the overview (starts a fresh view)</a></p>
+{% endblock %}

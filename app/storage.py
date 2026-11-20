@@ -66,6 +66,63 @@ CREATE INDEX IF NOT EXISTS idx_archived_spans_trace
 """
 
 
+def list_traces_on(
+    conn: sqlite3.Connection, limit: int = 100, offset: int = 0
+) -> tuple[list[dict], int]:
+    """Read a page of archived traces plus the total count on ``conn``.
+
+    Shared by the live store and by snapshot views: whatever connection is
+    passed in determines which committed state is seen.
+    """
+
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset))
+    total = conn.execute("SELECT COUNT(*) FROM archived_traces").fetchone()[0]
+    rows = conn.execute(
+        "SELECT trace_id, archived_at_ns, span_count, error_count,"
+        " root_name, service_names, duration_ns, min_start_ns"
+        " FROM archived_traces ORDER BY archived_at_ns DESC, trace_id ASC"
+        " LIMIT ? OFFSET ?",
+        (limit, offset),
+    ).fetchall()
+    traces = []
+    for row in rows:
+        item = dict(row)
+        item["service_names"] = json.loads(item.get("service_names") or "[]")
+        traces.append(item)
+    return traces, int(total)
+
+
+def get_trace_on(conn: sqlite3.Connection, trace_id: str) -> Optional[dict[str, Any]]:
+    """Read one full trace (header + every span) on ``conn``."""
+
+    trace_id = trace_id.strip().lower()
+    row = conn.execute(
+        "SELECT * FROM archived_traces WHERE trace_id = ?", (trace_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    span_rows = conn.execute(
+        "SELECT * FROM archived_spans WHERE trace_id = ? ORDER BY seq, span_id",
+        (trace_id,),
+    ).fetchall()
+    trace = dict(row)
+    trace["service_names"] = json.loads(trace.get("service_names") or "[]")
+    trace["spans"] = [_span_from_row(span) for span in span_rows]
+    return trace
+
+
+def _span_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    span = dict(row)
+    for key in ("attributes_json", "resource_json", "scope_json", "raw_json"):
+        try:
+            span[key[:-5]] = json.loads(span.pop(key) or "{}")
+        except json.JSONDecodeError:
+            span[key[:-5]] = {}
+    span["is_error"] = span.get("status_code") == "ERROR"
+    return span
+
+
 class ArchiveStore:
     """Thread-safe SQLite archive.
 
@@ -170,56 +227,15 @@ class ArchiveStore:
                 raise
 
     def get_trace(self, trace_id: str) -> Optional[dict[str, Any]]:
-        trace_id = trace_id.strip().lower()
         with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM archived_traces WHERE trace_id = ?", (trace_id,)
-            ).fetchone()
-            if row is None:
-                return None
-            span_rows = self._conn.execute(
-                "SELECT * FROM archived_spans WHERE trace_id = ? ORDER BY seq, span_id",
-                (trace_id,),
-            ).fetchall()
-        trace = dict(row)
-        trace["service_names"] = json.loads(trace.get("service_names") or "[]")
-        trace["spans"] = [self._span_from_row(span) for span in span_rows]
-        return trace
+            return get_trace_on(self._conn, trace_id)
 
     def list_traces(self, limit: int = 100, offset: int = 0) -> tuple[list[dict], int]:
-        limit = max(1, min(int(limit), 500))
-        offset = max(0, int(offset))
         with self._lock:
-            total = self._conn.execute(
-                "SELECT COUNT(*) FROM archived_traces"
-            ).fetchone()[0]
-            rows = self._conn.execute(
-                "SELECT trace_id, archived_at_ns, span_count, error_count,"
-                " root_name, service_names, duration_ns, min_start_ns"
-                " FROM archived_traces ORDER BY archived_at_ns DESC"
-                " LIMIT ? OFFSET ?",
-                (limit, offset),
-            ).fetchall()
-        traces = []
-        for row in rows:
-            item = dict(row)
-            item["service_names"] = json.loads(item.get("service_names") or "[]")
-            traces.append(item)
-        return traces, int(total)
+            return list_traces_on(self._conn, limit, offset)
 
     def count(self) -> int:
         with self._lock:
             return int(
                 self._conn.execute("SELECT COUNT(*) FROM archived_traces").fetchone()[0]
             )
-
-    @staticmethod
-    def _span_from_row(row: sqlite3.Row) -> dict[str, Any]:
-        span = dict(row)
-        for key in ("attributes_json", "resource_json", "scope_json", "raw_json"):
-            try:
-                span[key[:-5]] = json.loads(span.pop(key) or "{}")
-            except json.JSONDecodeError:
-                span[key[:-5]] = {}
-        span["is_error"] = span.get("status_code") == "ERROR"
-        return span

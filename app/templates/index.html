@@ -30,13 +30,24 @@
 {% endif %}
 
 <h2>Archived traces</h2>
+{% if view_id %}
+<div class="toolbar">
+  <span class="small muted">Snapshot of the committed archive as of this view's
+    first screen · expires in {{ view_expires_in }}s · new archives keep
+    committing in the background</span>
+  <span class="spacer"></span>
+  <form class="inline" method="post" action="/views/{{ view_id }}/end">
+    <button type="submit">View latest</button>
+  </form>
+</div>
+{% endif %}
 {% if traces %}
 <table>
   <thead><tr><th>Trace ID</th><th>Root operation</th><th>Services</th><th>Spans</th><th>Duration</th><th>Archived</th></tr></thead>
   <tbody>
   {% for t in traces %}
     <tr>
-      <td class="mono"><a href="/traces/{{ t.trace_id }}">{{ t.trace_id[:16] }}…{{ t.trace_id[-4:] }}</a></td>
+      <td class="mono"><a href="/traces/{{ t.trace_id }}?view={{ view_id }}&limit={{ limit }}&offset={{ offset }}">{{ t.trace_id[:16] }}…{{ t.trace_id[-4:] }}</a></td>
       <td>{{ t.root_name or '—' }}
         {% if t.error_count %}<span class="badge err">{{ t.error_count }} ERROR</span>{% endif %}</td>
       <td>{% for s in t.service_names %}<span class="tag">{{ s }}</span>{% endfor %}</td>
@@ -49,8 +60,8 @@
 </table>
 <div class="toolbar small muted">
   Showing {{ traces|length }} of {{ total }}.
-  {% if offset + limit < total %}<a href="/?limit={{ limit }}&offset={{ offset + limit }}">Older →</a>{% endif %}
-  {% if offset > 0 %}<a href="/?limit={{ limit }}&offset={{ [offset - limit, 0]|max }}">← Newer</a>{% endif %}
+  {% if offset + limit < total %}<a href="/?view={{ view_id }}&limit={{ limit }}&offset={{ offset + limit }}">Older →</a>{% endif %}
+  {% if offset > 0 %}<a href="/?view={{ view_id }}&limit={{ limit }}&offset={{ [offset - limit, 0]|max }}">← Newer</a>{% endif %}
 </div>
 {% else %}
 <div class="muted">Nothing archived yet. Only traces that contain an ERROR span are kept.</div>

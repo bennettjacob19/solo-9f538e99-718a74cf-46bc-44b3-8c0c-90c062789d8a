@@ -9,6 +9,8 @@ services:
       SAMPLE_WINDOW_SECONDS: "${SAMPLE_WINDOW_SECONDS:-2}"
       MAX_ACTIVE_TRACES: "${MAX_ACTIVE_TRACES:-16}"
       MAX_SPANS_PER_TRACE: "${MAX_SPANS_PER_TRACE:-64}"
+      VIEW_TTL_SECONDS: "${VIEW_TTL_SECONDS:-300}"
+      MAX_VIEWS: "${MAX_VIEWS:-8}"
       DB_PATH: /data/traces.db
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
     volumes:

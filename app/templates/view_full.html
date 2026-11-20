@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Too many open views{% endblock %}
+{% block content %}
+<h2>Too many open snapshot views</h2>
+<p class="muted">
+  At most 8 snapshot views can be open at the same time and each one is kept
+  for 5 minutes. Please wait for one to expire, then reopen the overview.
+</p>
+<p><a href="/">← Retry the overview</a></p>
+{% endblock %}
